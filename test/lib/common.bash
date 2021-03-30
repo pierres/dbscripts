@@ -103,7 +103,9 @@ setup() {
 	ARCHIVEUSER=""
 	SVNREPO="file://${TMP}/svn-packages-repo"
 	PKGREPOS=('core' 'extra' 'testing' 'staging')
+	DEBUGREPOS=('core-debug' 'extra-debug' 'testing-debug' 'staging-debug')
 	PKGPOOL='pool/packages'
+	DEBUGPKGPOOL='pool/packages-debug'
 	SRCPOOL='sources/packages'
 	STAGING_REPOS=('staging')
 	TESTING_REPOS=('testing')
@@ -128,6 +130,7 @@ eot
 	done
 	mkdir -p "${TMP}/ftp/${PKGPOOL}"
 	mkdir -p "${TMP}/ftp/${SRCPOOL}"
+	mkdir -p "${TMP}/ftp/${DEBUGPKGPOOL}"
 
 	# make dummy packages for "reproducibility"
 	pacman -Qi | awk -F': ' '\
@@ -197,7 +200,13 @@ checkPackageDB() {
 	local pkgname
 
 	local pkgarches=($(. "fixtures/$pkgbase/PKGBUILD"; echo ${arch[@]}))
-	local pkgnames=($(. "fixtures/$pkgbase/PKGBUILD"; echo ${pkgname[@]}))
+	# TODO: We need a better way to figure out when we are dealing with
+	#       debug packages
+	if [[ "${repo}" = *-debug ]]; then
+		local pkgnames=("${pkgbase}-debug")
+	else
+		local pkgnames=($(. "fixtures/$pkgbase/PKGBUILD";  echo "${pkgname[@]}"))
+	fi
 
 	if [[ ${pkgarches[@]} == any ]]; then
 		repoarches=(${ARCHES[@]})
@@ -208,9 +217,8 @@ checkPackageDB() {
 	for pkgarch in ${pkgarches[@]}; do
 		for pkgname in ${pkgnames[@]}; do
 			pkgfile="${pkgname}-${pkgver}-${pkgarch}${PKGEXT}"
-
-			[ -r ${FTP_BASE}/${PKGPOOL}/${pkgfile} ]
-			[ -r ${FTP_BASE}/${PKGPOOL}/${pkgfile}.sig ]
+			[ -r ${FTP_BASE}/${PKGPOOL}/${pkgfile} ] || [ -r ${FTP_BASE}/${DEBUGPKGPOOL}/${pkgfile} ]
+			[ -r ${FTP_BASE}/${PKGPOOL}/${pkgfile}.sig ] || [ -r ${FTP_BASE}/${DEBUGPKGPOOL}/${pkgfile}.sig ]
 			[ ! -r ${STAGING}/${repo}/${pkgfile} ]
 			[ ! -r ${STAGING}/${repo}/${pkgfile}.sig ]
 
@@ -223,10 +231,12 @@ checkPackageDB() {
 				fi
 
 				[ -L ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile} ]
-				[ "$(readlink -e ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile})" == ${FTP_BASE}/${PKGPOOL}/${pkgfile} ]
+				[ "$(readlink -e ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile})" == ${FTP_BASE}/${PKGPOOL}/${pkgfile} ] || \
+					[ "$(readlink -e ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile})" == ${FTP_BASE}/${DEBUGPKGPOOL}/${pkgfile} ]
 
 				[ -L ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile}.sig ]
-				[ "$(readlink -e ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile}.sig)" == ${FTP_BASE}/${PKGPOOL}/${pkgfile}.sig ]
+				[ "$(readlink -e ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile}.sig)" == ${FTP_BASE}/${PKGPOOL}/${pkgfile}.sig ] || \
+					[ "$(readlink -e ${FTP_BASE}/${repo}/os/${repoarch}/${pkgfile}.sig)" == ${FTP_BASE}/${DEBUGPKGPOOL}/${pkgfile}.sig ]
 
 				for db in ${DBEXT} ${FILESEXT}; do
 					[ -r "${FTP_BASE}/${repo}/os/${repoarch}/${repo}${db%.tar.*}" ]
@@ -246,7 +256,7 @@ checkPackage() {
 
 	local dirarches=() pkgbuildarches=()
 	local pkgbuild dirarch pkgbuildver
-	for pkgbuild in "${TMP}/svn-packages-copy/${pkgbase}/repos/${repo}-"+([^-])"/PKGBUILD"; do
+	for pkgbuild in "${TMP}/svn-packages-copy/${pkgbase}/repos/${repo%-debug}-"+([^-])"/PKGBUILD"; do
 		[[ -e $pkgbuild ]] || continue
 		dirarch=${pkgbuild%/PKGBUILD}
 		dirarch=${dirarch##*-}
@@ -273,8 +283,7 @@ checkRemovedPackage() {
 	local pkgbase=$2
 
 	svn up -q "${TMP}/svn-packages-copy/${pkgbase}"
-
-	if __isGlobfile "${TMP}/svn-packages-copy/${pkgbase}/repos/${repo}-"+([^-])"/PKGBUILD"; then
+	if __isGlobfile "${TMP}/svn-packages-copy/${pkgbase}/repos/${repo%-debug}-"+([^-])"/PKGBUILD"; then
 		return 1
 	fi
 
@@ -293,7 +302,14 @@ checkRemovedPackageDB() {
 	local pkgname
 
 	pkgarches=($(. "fixtures/$pkgbase/PKGBUILD"; echo ${arch[@]}))
-	pkgnames=($(. "fixtures/$pkgbase/PKGBUILD"; echo ${pkgname[@]}))
+
+	# TODO: We need a better way to figure out when we are dealing with
+	#       debug packages
+	if [[ "${repo}" = *-debug ]]; then
+		pkgnames=("${pkgbase}-debug")
+	else
+		pkgnames=($(. "fixtures/$pkgbase/PKGBUILD";  echo "${pkgname[@]}"))
+	fi
 
 	if [[ ${pkgarches[@]} == any ]]; then
 		tarches=(${ARCHES[@]})
