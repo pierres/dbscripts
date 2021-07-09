@@ -29,6 +29,20 @@ for repo in "${repos[@]}"; do
 	done
 done
 
+
+for repo in "${repos[@]}"; do
+	pkgs=($(getpkgfiles "${STAGING}/${repo}/"*${PKGEXTS}))
+	if (( $? == 0 )); then
+		for pkg in "${pkgs[@]}"; do
+			if ! fetch_pkgbuild "$(getpkgbase ${pkg})" "$(getpkgver ${pkg})"; then
+				die "Couldn't find package %s in git!" "${pkg}"
+			fi
+		done
+	fi
+done
+
+
+
 # check if packages are valid
 for repo in "${repos[@]}"; do
 	if ! check_repo_permission "${repo}"; then
@@ -39,6 +53,12 @@ for repo in "${repos[@]}"; do
 		for pkg in "${pkgs[@]}"; do
 			if [[ -h ${pkg} ]]; then
 				die "Package %s is a symbolic link" "$repo/${pkg##*/}"
+			fi
+			if ! check_signed_tag "${pkg}"; then
+				die "Package %s does not have a signed tag matching the version" "$repo/${pkg##*/}"
+			fi
+			if ! check_pkgbuild_checksum "${pkg}"; then
+				die "Package %s was not built with the checked in PKGBUILD" "$repo/${pkg##*/}"
 			fi
 			if ! check_pkgfile "${pkg}"; then
 				die "Package %s is not consistent with its meta data" "$repo/${pkg##*/}"
@@ -64,14 +84,16 @@ for repo in "${repos[@]}"; do
 			if ! check_builddir "${pkg}"; then
 				die "Package %s was not built in a chroot" "$repo/${pkg##*/}"
 			fi
-			if ! check_reproducible "${pkg}"; then
-				error "Package %s is not reproducible." "${pkg}"
-				die "Ensure that all dependencies are available in the repositories or are added in the same db-update."
-			fi
+			# if ! check_reproducible "${pkg}"; then
+			# 	error "Package %s is not reproducible." "${pkg}"
+			# 	die "Ensure that all dependencies are available in the repositories or are added in the same db-update."
+			# fi
 		done
 		if ! check_splitpkgs "${repo}" "${pkgs[@]}"; then
 			die "Missing split packages for %s" "$repo"
 		fi
+		# TODO:
+		# Add history repo information check as detailed in proposal
 	else
 		die "Could not read %s" "$STAGING"
 	fi
@@ -82,8 +104,11 @@ for repo in "${repos[@]}"; do
 	any_pkgs=($(getpkgfiles "${STAGING}/${repo}/"*-any${PKGEXTS} 2>/dev/null))
 	for pkgarch in "${ARCHES[@]}"; do
 		add_pkgs=()
+		declare -A add_vcspkgs
 		arch_pkgs=($(getpkgfiles "${STAGING}/${repo}/"*"-${pkgarch}"${PKGEXTS} 2>/dev/null))
 		for pkg in "${arch_pkgs[@]}" "${any_pkgs[@]}"; do
+			pkgbase="$(getpkgbase ${pkg})"
+			pkgver="$(getpkgver ${pkg})"
 			pkgfile="${pkg##*/}"
 			msg2 '%s (%s)' "$pkgfile" "$pkgarch"
 			# any packages might have been moved by the previous run
@@ -100,12 +125,26 @@ for repo in "${repos[@]}"; do
 				ln -s "../../../${PKGPOOL}/${pkgfile}.sig" "$FTP_BASE/$repo/os/${pkgarch}"
 			fi
 			add_pkgs+=("${pkgfile}")
+			add_vcspkgs["${pkgfile}::pkgbase"]="${pkgbase}"
+			add_vcspkgs["${pkgfile}::pkgver"]="${pkgver}"
 		done
 		if (( ${#add_pkgs[@]} >= 1 )); then
 			arch_repo_modify add "${repo}" "${pkgarch}" ${add_pkgs[@]}
 		fi
+		if ((REPO_MODIFIED)); then
+			for pkg in ${add_pkgs[@]}; do
+				pkgbase="${add_vcspkgs[$pkg::pkgbase]}"
+				pkgver="${add_vcspkgs[$pkg::pkgver]}"
+				vcs_update_package "$pkgbase" "$pkgver" "${repo}-${pkgarch}"
+			done
+		fi
 	done
 done
+
+if ((REPO_MODIFIED)); then
+	vcs_tag
+	vcs_push
+fi
 
 for repo in "${repos[@]}"; do
 	for pkgarch in "${ARCHES[@]}"; do

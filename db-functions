@@ -39,6 +39,9 @@ mv_acl() {
 
 # set up general environment
 WORKDIR=$(mktemp -dt "${0##*/}.XXXXXXXXXX")
+# TODO: Solve group permissions between user and 
+# git user
+chmod -R 770 "${WORKDIR}"
 LOCKS=()
 REPO_MODIFIED=0
 
@@ -305,7 +308,7 @@ check_pkgvcs() {
 	in_array "${repo}" "${PKGREPOS[@]}" || return 1
 
 	local vcsver vcsnames=()
-	read -rd'\n' vcsver vcsnames < <(source_pkgbuild "${_pkgbase}" "repos/${repo}-${_pkgarch}"; \
+	read -rd'\n' vcsver vcsnames < <(source_pkgbuild "${_pkgbase}" "${_pkgver}"; \
 	                                 get_full_version; echo "${pkgname[@]}")
 	read -ra vcsnames <<<"${vcsnames}"
 
@@ -330,13 +333,15 @@ check_splitpkgs() {
 		local _pkgbase="$(getpkgbase "${pkgfile}")"
 		local _pkgname="$(getpkgname "${pkgfile}")"
 		local _pkgarch="$(getpkgarch "${pkgfile}")"
-		local vcsnames=($(source_pkgbuild "${_pkgbase}" "repos/${repo}-${_pkgarch}"; echo "${pkgname[@]}"))
+		local _pkgver="$(getpkgver "${pkgfile}")"
+		local vcsnames=($(source_pkgbuild "${_pkgbase}" "${_pkgver}"; echo "${pkgname[@]}"))
 
 		# not a split package
 		(( ${#vcsnames[@]} > 1 )) || continue
 
 		mkdir -p "${repo}/${_pkgarch}/${_pkgbase}"
 		echo "${_pkgname}" >> "${repo}/${_pkgarch}/${_pkgbase}/staging"
+
 		printf '%s\n' "${vcsnames[@]}" >> "${repo}/${_pkgarch}/${_pkgbase}/vcs"
 	done
 	popd >/dev/null
@@ -394,8 +399,8 @@ check_stagingrepos() {
 	return 1
 }
 
-#usage: chk_license ${license[@]}"
-chk_license() {
+#usage: check_license ${license[@]}"
+check_license() {
 	local l
 	for l in "${@}"; do
 		in_array "${l}" "${ALLOWED_LICENSES[@]}" && return 0
@@ -483,5 +488,27 @@ check_reproducible() {
 		return 1
 	done
 }
+
+# TODO: Needs to verify the keyid is in the keyring
+check_signed_tag(){
+	local pkgbase="$(getpkgbase ${1})"
+	local pkgver="$(conv_tag $(getpkgver ${1}))"
+	if ! GNUPGHOME=/etc/pacman.d/gnupg git -C "${WORKDIR}/${pkgbase}" verify-tag "${pkgver}" 1>/dev/null ; then
+		return 1
+	fi
+}
+
+# Verified the package .BUIDINFO PKGBUID sha256sum against the checked out version
+check_pkgbuild_checksum(){
+	local pkgbase="$(getpkgbase ${1})"
+	local pkgver="$(getpkgver ${1})"
+	local pkgfile_checksum="$(_grep_buildinfo "${1}" "pkgbuild_sha256sum")"
+
+	local sum="$(sha256sum "${WORKDIR}/${pkgbase}/PKGBUILD")"
+	if [[ "$pkgfile_checksum" != "${sum%% *}" ]]; then
+		return 1
+	fi
+}
+
 
 . "$(dirname "$(readlink -e "${BASH_SOURCE[0]}")")/db-functions-${VCS}"

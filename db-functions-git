@@ -1,0 +1,144 @@
+#!/hint/bash
+
+if [[ -n ${GITUSER} ]]; then
+	setfacl -m u:"${GITUSER}":rwx "${WORKDIR}"
+	setfacl -m d:u:"${USER}":rwx "${WORKDIR}"
+	setfacl -m d:u:"${GITUSER}":rwx "${WORKDIR}"
+fi
+
+# Converts from the PKGBUILD tag to the git repository tag
+# Input		1:1.0.0-1
+# Output	release-1-1.0.0-1
+conv_tag(){
+	printf "release-%s" "${1/:/-}"
+}
+
+parse_pkgver_from_tag(){
+	tag="${1}"
+    [[ $tag == release-* ]] || exit 1
+	tag="${tag#release-}"
+	while IFS=- read -r pkgrel pkgver epoch; do
+		test -n "${epoch}" && printf "%s:" "$epoch"
+		printf "%s" "$(echo "$pkgver" | rev)"
+		printf "%s" "$(echo "$pkgrel-" | rev)"
+	done < <(echo "${tag}" | rev)
+}
+
+arch_git() {
+	if [[ -z ${GITUSER} ]]; then
+		/usr/bin/git "${@}"
+	else
+		sudo -u "${GITUSER}" -- /usr/bin/git "${@}"
+	fi
+}
+
+
+# The SVN version should just check the path is present....
+fetch_pkgbuild(){
+	local pkgbase="${1}"
+	local tag=$(conv_tag "${2}")
+	local found=0
+	for repo in "${UPSTREAM_REPOS[@]}"; do
+		if [ -d "$WORKDIR/${pkgbase}" ] || arch_git clone --branch "$tag" --depth 1 "${GITREPOS}/${repo}/${pkgbase}.git" "$WORKDIR/${pkgbase}"; then
+			found=1
+			break
+		fi
+	done
+	if ((!found)); then
+		return 1
+	fi
+}
+
+
+# Source the PKGBUILD from the package's git/svn/whatever repo.
+# Depending on how the VCS is used the tag might be "trunk" or "repos/$repo-$arch"
+# or the full package version (release-epoch-pkgver-pkgrel) or any other recognized tag.
+source_pkgbuild() {
+	local pkgbase="$1"
+	local tag=$(conv_tag ${2})
+	. <(cat "${WORKDIR}/${pkgbase}/PKGBUILD" 2>/dev/null || echo false)
+}
+
+# Export PKGBUILD resource following the same rules as source_pkgbuild()
+export_from_pkgrepo() {
+	local pkgbase="$1"
+	local tag=$(conv_tag ${2})
+	local src="$3"
+	local dest="$4"
+	
+	if [[ ! -e ${dest} ]]; then
+		mkdir -p "${dest}"
+		arch_git -C "${WORKDIR}/${pkgbase}" archive "$tag" | bsdtar -xf - -C "${dest}"
+	fi
+}
+
+# Which repo is this package in?
+find_repo_for_package() {
+	local pkgbase=${1}
+	local pkgarch=${2}
+	local candidates=("${@:3}")
+
+	local repos=($(arch_git -C "${GITREPO}" ls-files "*/$pkgbase" | awk -F/ '{print $1}' | \
+		grep -xFf <(printf "%s\n" "${candidates[@]/%/-${pkgarch}}" "${candidates[@]/%/-any}")))
+
+	if (( ${#repos[@]} > 1 )); then
+		die "%s is present in multiple repos (%s)" "${pkgbase}" "${repos[*]}"
+	fi
+	(( ${#repos[@]} == 1 )) || return $?
+
+	printf '%s\n' "${repos[@]%/}"
+}
+
+# Commit changes staged by (successive?) vcs_(re)?move_package runs.
+vcs_commit() {
+	arch_git -C "${GITREPO}" commit -m "${1}:" 
+}
+
+
+vcs_update_package(){
+	local pkgbase="$1"
+	local tag="${2}"
+	local gittag="$(conv_tag ${2})"
+	local dest="$3"
+	if [[ ! -e "$GITREPO/${dest}" ]]; then
+		die "Repository %s doesn't exist!" "${dest}"
+	fi
+	echo "$pkgbase $gittag $(git -C "${WORKDIR}/${pkgbase}" rev-list -n 1 "$gittag")" > "$GITREPO/$dest/$pkgbase"
+	arch_git -C "${GITREPO}" add "$GITREPO/$dest/$pkgbase" || true
+	vcs_commit "updated ${pkgbase}-${tag} in [${dest}]" || true
+}
+
+# Write to the VCS in order to track a package moving between different pacman
+# repositories.
+vcs_move_package() {
+	local pkgbase=${1}
+	local vcsrepo_from=${GITREPO}/${2}
+	local vcsrepo_to=${GITREPO}/${3}
+	if [[ ! -e "${vcsrepo_to}" ]]; then
+		mkdir -p "${vcsrepo_to}"
+	fi
+	arch_git -C "$GITREPO" mv "$vcsrepo_from/${pkgbase}" "$vcsrepo_to/${pkgbase}"
+}
+
+# Write to the VCS in order to track a package being deleted from a pacman
+# repository.
+vcs_remove_package() {
+	local pkgbase=${1}
+	local vcsrepo=${GITREPO}/${2}/${pkgbase}
+
+	arch_git -C "$GITREPO" rm "$vcsrepo" 
+}
+
+vcs_push(){
+	arch_git -C "$GITREPO" push --tags origin master
+}
+
+vcs_tag(){
+	if [[ ! $(arch_git -C "$GITREPO" tag --points-at HEAD) ]]; then
+		if ! tag=$(arch_git -C "$GITREPO" describe --tags --abbrev=0 2>/dev/null); then
+			tag=0
+		fi
+		((tag++))
+		arch_git -C "$GITREPO" tag "$tag"
+	fi
+}
